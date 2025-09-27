@@ -14,6 +14,7 @@ from chat_llm.chat_config import CFG as CHAT_CONF
 from openai import OpenAI
 from chat_llm.logger import setup_logger
 logger = setup_logger('CCS', log_file='logs/CCS.log')
+from chat_llm.config import api_key
 
 
 # 基础prompt模板
@@ -147,7 +148,7 @@ class NativeChat(object):
         resp = self.chat_with_messages(session_id, user_assistant_history=user_assistant_history, query=query, knowledge=knowledge)
         return resp 
 
-    def retrieve_knowledge(self, query, base_url="http://101.201.212.43:8090", api_key="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"):
+    def retrieve_knowledge(self, query, base_url="http://101.201.212.43:8090", api_key=api_key):
         url = f"{base_url}/v1/knowledge/retrieve"
         headers = {
             "Authorization": f"Bearer {api_key}",

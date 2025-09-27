@@ -5,9 +5,10 @@
 作者: logiccao
 """
 import requests
+from chat_llm.config import api_key
 
 
-def retrieve_knowledge(query, base_url="http://101.201.212.43:8090", api_key="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"):
+def retrieve_knowledge(query, base_url="http://101.201.212.43:8090", api_key=api_key):
     """
     查询知识库
     
