@@ -308,4 +308,4 @@ if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5019, debug=False)
     
 
-# nohup python3 -m chat_llm.chat_api_wrap &
+# nohup python3 -m chat_llm.cloud_chat_api_wrap &
