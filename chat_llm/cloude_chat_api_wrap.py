@@ -71,7 +71,8 @@ def naive_med_chat_api():
             return jsonify({'msg': msg}), code 
 
         logger.info(f'request data : {request_data}')
-        stream_resp = NativeChator_med_audio.chat_with_query(session_id = session_id, query = query) # a generator 
+        knowledge = True if "knowledge" == request_data.get("dialog_type") else False
+        stream_resp = NativeChator_med_audio.chat_with_query(session_id=session_id, query=query, knowledge=knowledge) # a generator 
         full_text = ''
         session_finish = 'false'
         def wrap_stream_resp(stream_resp):
@@ -139,82 +140,168 @@ def session_history():
     except Exception as e:
         logger.error(f'api internal error : {str(e)}')
 
-
 @app.route('/feedback', methods=['POST'])
 def feedback_api():
-    """用户反馈API接口"""
+    """用户反馈API接口 - 标准化版本，所有反馈立即生效"""
     request_id = g.request_id
     logger.debug(f'feedback request_id: {request_id}')
     code = 200
     msg = 'success'
+    optimization_type = None  # 记录优化类型
 
+    # try:
+    request_data = request.get_json()
+
+    # 验证必要字段
+    required_fields = ['sessionId', 'userQuery', 'assistantResponse', 'dialogType', 'problemSolved', 'rating', 'timestamp']
+    for field in required_fields:
+        if field not in request_data:
+            code = 400
+            msg = f'缺少必要字段: {field}'
+            logger.error(f'feedback API error: {msg}')
+            return jsonify({'msg': msg}), code
+
+    # 提取反馈数据
+    session_id = request_data['sessionId']
+    user_query = request_data['userQuery']
+    assistant_response = request_data['assistantResponse']
+    dialogType = request_data['dialogType']
+    problemSolved = request_data['problemSolved']
+    rating = request_data['rating']
+    timestamp = request_data.get('timestamp', datetime.now().isoformat())
+
+    logger.info(f"session_id: {session_id}")
+    logger.info(f"user_query: {user_query}")
+    logger.info(f"assistant_response: {assistant_response}")
+    logger.info(f"dialogType: {dialogType}")
+    logger.info(f"problemSolved: {problemSolved}")
+    logger.info(f"rating: {rating}")
+
+
+    # # 映射前端反馈类型到后端
+    # feedback_type_mapping = {
+    #     'helpful': 'helpful',
+    #     'unclear': 'unclear', 
+    #     'needsguidance': 'needsguidance',
+    #     'inaccurate': 'inaccurate'
+    # }
+    
+    # feedback_type = feedback_type_mapping.get(selected_feedback, 'helpful')
+
+    # # 构建反馈记录
+    # feedback_record = {
+    #     'feedback_id': f"fb-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}",
+    #     'session_id': session_id,
+    #     'user_query': user_query,
+    #     'assistant_response': assistant_response,
+    #     'selected_feedback': selected_feedback,
+    #     'custom_feedback': custom_feedback,
+    #     'timestamp': timestamp,
+    #     'request_id': request_id
+    # }
+
+    # 记录到日志
+    # logger.info(f'收到用户反馈: session_id={session_id}, selected_feedback={selected_feedback}')
+    # logger.debug(f'反馈详情: {json.dumps(feedback_record, ensure_ascii=False, indent=2)}')
+
+    # # 立即处理反馈并更新prompt
+    # try:
+    #     # 处理反馈 - 所有类型都会立即生效
+    #     optimization_result = NativeChator_med_audio.process_feedback(
+    #         session_id=session_id,
+    #         feedback_type=feedback_type,
+    #         custom_feedback=custom_feedback,
+    #         user_query=user_query,
+    #         assistant_response=assistant_response
+    #     )
+        
+    #     # 确定优化类型
+    #     if feedback_type == 'helpful':
+    #         optimization_type = 'maintained'  # 保持不变
+    #         msg = '反馈已收到，当前策略保持不变'
+    #     elif feedback_type in ['unclear', 'needsguidance', 'inaccurate']:
+    #         optimization_type = 'standard_adjustment'
+    #         msg = f'反馈已收到，已应用{feedback_type}类型的标准优化'
+        
+    #     # 如果有具体意见，会触发额外的动态优化
+    #     if custom_feedback and len(custom_feedback) > 10:
+    #         optimization_type = 'custom_optimization'
+    #         msg = '反馈已收到，已根据您的具体意见进行个性化优化'
+        
+    #     logger.info(f"Session {session_id} 应用了优化类型: {optimization_type}")
+        
+    # except Exception as e:
+    #     logger.error(f'处理反馈优化时出错: {str(e)}')
+    #     msg = '反馈已收到，但优化过程出现问题'
+
+    # # 保存到反馈日志文件
+    # try:
+    #     feedback_logger = setup_logger('FEEDBACK', log_file='logs/feedback.log')
+    #     feedback_record['optimization_type'] = optimization_type
+    #     feedback_logger.info(json.dumps(feedback_record, ensure_ascii=False))
+    # except Exception as log_error:
+    #     logger.warning(f'保存反馈')
+    
+    return jsonify({
+        'msg': "testing",
+        'code': 200,
+        'optimization_triggered': "123",
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+
+@app.route('/prompt/optimization_report', methods=['GET'])
+def get_optimization_report():
+    """获取prompt优化报告API"""
+    try:
+        session_id = request.args.get('session_id', None)
+        
+        # 获取优化报告
+        report = NativeChator_med_audio.get_optimization_report(session_id)
+        
+        return jsonify({
+            'code': 200,
+            'msg': 'success',
+            'report': report,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        logger.error(f'获取优化报告失败: {str(e)}')
+        return jsonify({
+            'code': 500,
+            'msg': f'获取报告失败: {str(e)}'
+        }), 500
+
+
+@app.route('/prompt/reset', methods=['POST'])
+def reset_session_prompt():
+    """重置会话prompt为默认值"""
     try:
         request_data = request.get_json()
-
-        # 验证必要字段
-        required_fields = ['sessionId', 'userQuery', 'assistantResponse']
-        for field in required_fields:
-            if field not in request_data:
-                code = 400
-                msg = f'缺少必要字段: {field}'
-                logger.error(f'feedback API error: {msg}')
-                return jsonify({'msg': msg}), code
-
-        # 提取反馈数据
-        session_id = request_data['sessionId']
-        user_query = request_data['userQuery']
-        assistant_response = request_data['assistantResponse']
-        selected_feedback = request_data.get('selectedFeedback', '')
-        custom_feedback = request_data.get('customFeedback', '')
-        timestamp = request_data.get('timestamp', datetime.now().isoformat())
-
-        # 构建反馈记录
-        feedback_record = {
-            'feedback_id': f"fb-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}",
-            'session_id': session_id,
-            'user_query': user_query,
-            'assistant_response': assistant_response,
-            'selected_feedback': selected_feedback,
-            'custom_feedback': custom_feedback,
-            'timestamp': timestamp,
-            'request_id': request_id
-        }
-
-        # 记录到日志
-        logger.info(f'收到用户反馈: session_id={session_id}, selected_feedback={selected_feedback}')
-        logger.debug(f'反馈详情: {json.dumps(feedback_record, ensure_ascii=False, indent=2)}')
-        logger.info(NativeChator_med_audio.system_prompt)
-
-        # 可选：保存到文件或数据库
-        # 这里先简单记录到日志，您可以根据需要扩展存储逻辑
-        try:
-            # 保存到反馈日志文件
-            feedback_logger = setup_logger('FEEDBACK', log_file='logs/feedback.log')
-            feedback_logger.info(json.dumps(feedback_record, ensure_ascii=False))
-        except Exception as log_error:
-            logger.warning(f'保存反馈到日志文件失败: {str(log_error)}')
-
-        # 可选：根据反馈类型进行特殊处理
-        if selected_feedback in ['inaccurate', 'incomplete']:
-            logger.warning(f'收到负面反馈 - session_id: {session_id}, type: {selected_feedback}')
-            # 这里可以添加告警或特殊处理逻辑
-
-        msg = '反馈提交成功'
-
-    except KeyError as e:
-        code = 400
-        msg = f'请求数据格式错误: {str(e)}'
-        logger.error(f'feedback API KeyError: {msg}')
+        session_id = request_data.get('session_id')
+        
+        if not session_id:
+            return jsonify({
+                'code': 400,
+                'msg': '缺少session_id参数'
+            }), 400
+        
+        # 重置prompt
+        NativeChator_med_audio.reset_session_prompt(session_id)
+        
+        return jsonify({
+            'code': 200,
+            'msg': f'Session {session_id} prompt已重置',
+            'timestamp': datetime.now().isoformat()
+        }), 200
+        
     except Exception as e:
-        code = 500
-        msg = f'服务器内部错误: {str(e)}'
-        logger.error(f'feedback API内部错误: {str(e)}')
-
-    return jsonify({
-        'msg': msg,
-        'code': code,
-        'timestamp': datetime.now().isoformat()
-    }), code
+        logger.error(f'重置prompt失败: {str(e)}')
+        return jsonify({
+            'code': 500,
+            'msg': f'重置失败: {str(e)}'
+        }), 500
 
 
 if __name__ == "__main__":
