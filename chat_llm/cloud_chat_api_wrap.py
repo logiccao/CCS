@@ -1,311 +1,290 @@
-
 # -*- coding: utf-8 -*-
 """
-文件名: chat_api_wrap.py
-创建时间: 2025/09/26
+文件名: app_ccs.py
+创建时间: 2025/09/28
 作者: logiccao
 """
-from flask import Flask, request, jsonify, Response, stream_with_context, g
-from flask_cors import CORS
+from fastapi import FastAPI, Request, Depends, HTTPException, status, Form
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Union
+import json
+import secrets
+import uvicorn
+from pathlib import Path
 from datetime import datetime
 import uuid
-import json 
-import re 
-from chat_llm.check_header import check_header
+import re
+
+# 导入业务模块
 from chat_llm.logger import setup_logger
-logger = setup_logger('CCS', log_file='logs/CCS.log')
-app = Flask(__name__)
-CORS(app, resources=r'/*')
-CORS(app, supports_credentials=True) 
 from chat_llm.naive_chat import NativeChat
 
+# 初始化
+logger = setup_logger('CCS', log_file='logs/CCS.log')
 NativeChator_med_audio = NativeChat(name='naive_med_audio', logger=logger, use_model='deepseek-v3')
-check_header(app)
+app = FastAPI()
 
+# 配置中间件
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# 配置常量
+PASSWORD = "369.logic"
+
+# 配置模板
+templates = Jinja2Templates(directory="templates")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 业务数据存储
 session_cache = {}
+auth_sessions = {}
 
+# 工具函数
 def generate_session_id():
-    """生成唯一session_id (UUID4 + 时间戳)"""
     return f"sid-{datetime.now().strftime('%Y%m%d%H%M')}-{uuid.uuid4().hex[:8]}"
 
-def check_pattern(text, patterns):
-    """检查文本是否包含特定模式"""
-    for pattern in patterns:
-        if pattern in text:
-            return 'true'
-    return 'false'
-
-end_pattern = re.compile(r'(?:^|[\s,，.。;；])(?:(?:好的|行|明白了|知道了|没问题|ok)\W*(?:谢谢|感谢|thx|3q)\W*(?:您|你)?\W*(?:再见|拜拜|结束)?[!！。.？?]*$|(?:那就这样|那就到这里|没有(?:其他)?问题了?|我(?:的)?问题(?:解决)?了|不需要了?|可以了?|没事了?|就这样吧)[!！。.？?]*$|(?:谢谢|感谢|多谢|thx|3q)\W*(?:您|你)?\W*(?:啊|啦|呢)?[!！。.？?]*$|(?:再见|拜拜|结束|挂了吧?|停吧?|bye)[\s\W]*$|(?:thank\s*you|thanks|bye|byebye)[\s\W]*$)', 
-                         re.IGNORECASE)
+end_pattern = re.compile(r'(?:^|[\s,，.。;；])(?:(?:好的|行|明白了|知道了|没问题|ok)\W*(?:谢谢|感谢|thx|3q)\W*(?:您|你)?\W*(?:再见|拜拜|结束)?[!！。.？?]*$|(?:那就这样|那就到这里|没有(?:其他)?问题了?|我(?:的)?问题(?:解决)?了|不需要了?|可以了?|没事了?|就这样吧)[!！。.？?]*$|(?:谢谢|感谢|多谢|thx|3q)\W*(?:您|你)?\W*(?:啊|啦|呢)?[!！。.？?]*$|(?:再见|拜拜|结束|挂了吧?|停吧?|bye)[\s\W]*$|(?:thank\s*you|thanks|bye|byebye)[\s\W]*$)', re.IGNORECASE)
 
 def should_end_call(user_input):
     return bool(end_pattern.search(user_input))
 
+# 请求模型
+class ChatRequest(BaseModel):
+    query: str
+    session_id: str = ""
+    dialog_type: str = ""
 
-@app.route('/chat_audio/naive_med', methods=['POST'])
-def naive_med_chat_api():
-    """流式对话API接口, triage chat"""
-    request_id = g.request_id
-    logger.debug(f'request_id :{request_id}')
-    success_resp = None
-    code = 500
-    msg = ''
+from typing import Union
+
+class FeedbackRequest(BaseModel):
+    sessionId: str
+    userQuery: str
+    assistantResponse: str
+    dialogType: str
+    problemSolved: Union[str, bool]  # 允许字符串或布尔值
+    rating: Union[str, int]          # 允许字符串或整数
+    timestamp: str = ""
+
+class SessionRequest(BaseModel):
+    session_id: str
+
+# 认证相关
+def get_auth_session(request: Request):
+    session_id = request.cookies.get("session_id")
+    if session_id not in auth_sessions:
+        session_id = secrets.token_urlsafe(24)
+        auth_sessions[session_id] = {"authenticated": False}
+    return session_id, auth_sessions[session_id]
+
+def is_authenticated(request: Request):
+    _, session_data = get_auth_session(request)
+    return session_data.get("authenticated", False)
+
+class AuthenticationRequired(Exception):
+    pass
+
+@app.exception_handler(AuthenticationRequired)
+async def auth_exception_handler(request: Request, exc: AuthenticationRequired):
+    return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+
+async def require_auth(request: Request):
+    if not is_authenticated(request):
+        raise AuthenticationRequired()
+    return None
+
+# 聊天API
+@app.post('/chat_audio/naive_med')
+async def naive_med_chat_api(chat_request: ChatRequest):
+    request_id = str(uuid.uuid4().hex[:8])
+    logger.debug(f'request_id: {request_id}')
+    
+    query = chat_request.query
+    session_id = chat_request.session_id
+    
+    # 会话管理
+    if not session_id:
+        session_id = generate_session_id()
+        session_cache[session_id] = ''
+        logger.info('新会话')
+    else:
+        if session_id not in session_cache:
+            raise HTTPException(status_code=400, detail='请求错误：session_id')
+        elif session_cache.get(session_id) == 'done':
+            raise HTTPException(status_code=400, detail='请求错误：会话已结束')
+
+    logger.info(f'request data: {chat_request.dict()}')
+    knowledge = chat_request.dialog_type == "knowledge"
+    stream_resp = NativeChator_med_audio.chat_with_query(session_id=session_id, query=query, knowledge=knowledge)
+    
+    full_text = ''
+    session_finish = 'false'
+    
+    def generate_stream():
+        nonlocal full_text, session_finish
+        for chunk in stream_resp:  # 同步遍历流式响应
+            if chunk:
+                for choice in chunk.choices:
+                    content = choice.delta.content
+                    if content:
+                        full_text += content
+                        response_data = {
+                            "text_chunk": content,
+                            "session_finish": session_finish,
+                            "session_id": session_id
+                        }
+                        yield f'id: {request_id}\nevent: message\ndata: {json.dumps(response_data)}\n\n'
+        
+        # 处理流式结束
+        if full_text:
+            end_call = should_end_call(query)
+            session_finish = 'true' if end_call else 'false'
+            if session_finish == 'true':
+                session_cache[session_id] = 'done'
+            response_data = {
+                "text_chunk": '',
+                "session_finish": session_finish,
+                "session_id": session_id
+            }
+            yield f'id: {request_id}\nevent: done\ndata: {json.dumps(response_data)}\n\n'
+        
+        # 在生成器结束后记录
+        logger.debug(f'request_id: {request_id}')
+        NativeChator_med_audio.store_to_history(session_id, full_text)
+        logger.debug(f'模型全部回答：{full_text}')
+
+    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+@app.post('/session/history')
+async def session_history(history_request: SessionRequest):
     try:
-        request_data = request.get_json()
-        query = request_data['query']
-        session_id = request_data.get('session_id', '')
-        if session_id == '':
-            session_id = generate_session_id()
-            session_cache[session_id] = ''
-            msg = '新会话'
-            logger.info('新会话')
+        session_id = history_request.session_id
+        if hasattr(NativeChator_med_audio, 'conversations'):
+            conversations = NativeChator_med_audio.conversations
         else:
-            if session_id not in session_cache:
-                code = 400
-                msg = '请求错误：session_id'
-            elif session_cache.get(session_id) == 'done':
-                code = 400
-                msg = '请求错误：会话已结束'
-        if code == 400:
-            logger.error(f'{msg}, {code}')
-            return jsonify({'msg': msg}), code 
-
-        logger.info(f'request data : {request_data}')
-        knowledge = True if "knowledge" == request_data.get("dialog_type") else False
-        stream_resp = NativeChator_med_audio.chat_with_query(session_id=session_id, query=query, knowledge=knowledge) # a generator 
-        full_text = ''
-        session_finish = 'false'
-        def wrap_stream_resp(stream_resp):
-            nonlocal full_text
-            nonlocal request_id
-            nonlocal session_finish
-            for chunk in stream_resp:  # 按块读取数据
-                if chunk:
-                    for choice in chunk.choices:
-                        content = choice.delta.content
-                        if content:
-                            # print(content, end="")
-                            full_text += content  # 将每块数据拼接到长文本中
-                            response_data = {
-                                "text_chunk": content,
-                                "session_finish": session_finish,
-                                "session_id" : session_id
-                            }
-                            yield f'id: {request_id}\nevent: message\ndata: {json.dumps(response_data)}\n\n'  # 将数据块返回给客户端
-            if len(full_text) > 0:
-                end_call = should_end_call(query)
-                session_finish = 'true' if end_call else 'false'
-                if session_finish == 'true':
-                    session_cache[session_id] = 'done'
-                response_data = {
-                    "text_chunk": '',
-                    "session_finish": session_finish,
-                    "session_id" : session_id
-                }
-                yield f'id: {request_id}\nevent: done\ndata: {json.dumps(response_data)}\n\n'
-
-        success_resp = Response(
-                wrap_stream_resp(stream_resp = stream_resp), 
-                mimetype = "text/event-stream", # 传过来，其实是"text/event-stream"
-                status = 200)  
-    except Exception as e:
-        logger.error(f'chat_api内部出错：{str(e)}')
-        code = 500
-        return jsonify({'msg' : f'{str(e)}'}), code
-    if success_resp is not None:
-        @success_resp.call_on_close
-        def record_full_text():
-            logger.debug(f'request_id :{request_id}')
-            NativeChator_med_audio.store_to_history(session_id, full_text)
-            logger.debug(f'模型全部回答：{full_text}')
-        return success_resp
-
-
-@app.route('/session/history', methods=['POST'])
-def session_history():
-    msg = ''
-    history = []
-    try:
-        request_data = request.get_json()
-        session_id = request_data['session_id']
-        if session_id not in RAGChator.conversations:
+            return {'msg': 'success', 'history': []}
+            
+        if session_id not in conversations:
             msg = f'{session_id} not in conversations'
+        elif 'user_assistant_history' not in conversations[session_id]:
+            msg = f'{session_id} has no user_assistant_history'
         else:
-            if 'user_assistant_history' not in RAGChator.conversations[session_id]:
-                msg = f'{session_id} has no user_assistant_history'
-        if msg == '':
-            history = RAGChator.conversions[session_id]['user_assistant_history'] 
-            msg = 'success'
-        return jsonify({'msg' : msg, 'history': history}), 200
+            return {'msg': 'success', 'history': conversations[session_id]['user_assistant_history']}
+        
+        return {'msg': msg, 'history': []}
     except Exception as e:
-        logger.error(f'api internal error : {str(e)}')
+        logger.error(f'api internal error: {str(e)}')
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.route('/feedback', methods=['POST'])
-def feedback_api():
-    """用户反馈API接口 - 标准化版本，所有反馈立即生效"""
-    request_id = g.request_id
+@app.post('/feedback')
+async def feedback_api(feedback_request: FeedbackRequest):
+    request_id = str(uuid.uuid4().hex[:8])
     logger.debug(f'feedback request_id: {request_id}')
-    code = 200
-    msg = 'success'
-    optimization_type = None  # 记录优化类型
-
-    # try:
-    request_data = request.get_json()
-
-    # 验证必要字段
-    required_fields = ['sessionId', 'userQuery', 'assistantResponse', 'dialogType', 'problemSolved', 'rating', 'timestamp']
-    for field in required_fields:
-        if field not in request_data:
-            code = 400
-            msg = f'缺少必要字段: {field}'
-            logger.error(f'feedback API error: {msg}')
-            return jsonify({'msg': msg}), code
-
-    # 提取反馈数据
-    session_id = request_data['sessionId']
-    user_query = request_data['userQuery']
-    assistant_response = request_data['assistantResponse']
-    dialogType = request_data['dialogType']
-    problemSolved = request_data['problemSolved']
-    rating = request_data['rating']
-    timestamp = request_data.get('timestamp', datetime.now().isoformat())
-
-    logger.info(f"session_id: {session_id}")
-    logger.info(f"user_query: {user_query}")
-    logger.info(f"assistant_response: {assistant_response}")
-    logger.info(f"dialogType: {dialogType}")
-    logger.info(f"problemSolved: {problemSolved}")
-    logger.info(f"rating: {rating}")
-
-
-    # # 映射前端反馈类型到后端
-    # feedback_type_mapping = {
-    #     'helpful': 'helpful',
-    #     'unclear': 'unclear', 
-    #     'needsguidance': 'needsguidance',
-    #     'inaccurate': 'inaccurate'
-    # }
     
-    # feedback_type = feedback_type_mapping.get(selected_feedback, 'helpful')
-
-    # # 构建反馈记录
-    # feedback_record = {
-    #     'feedback_id': f"fb-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}",
-    #     'session_id': session_id,
-    #     'user_query': user_query,
-    #     'assistant_response': assistant_response,
-    #     'selected_feedback': selected_feedback,
-    #     'custom_feedback': custom_feedback,
-    #     'timestamp': timestamp,
-    #     'request_id': request_id
-    # }
-
-    # 记录到日志
-    # logger.info(f'收到用户反馈: session_id={session_id}, selected_feedback={selected_feedback}')
-    # logger.debug(f'反馈详情: {json.dumps(feedback_record, ensure_ascii=False, indent=2)}')
-
-    # # 立即处理反馈并更新prompt
-    # try:
-    #     # 处理反馈 - 所有类型都会立即生效
-    #     optimization_result = NativeChator_med_audio.process_feedback(
-    #         session_id=session_id,
-    #         feedback_type=feedback_type,
-    #         custom_feedback=custom_feedback,
-    #         user_query=user_query,
-    #         assistant_response=assistant_response
-    #     )
-        
-    #     # 确定优化类型
-    #     if feedback_type == 'helpful':
-    #         optimization_type = 'maintained'  # 保持不变
-    #         msg = '反馈已收到，当前策略保持不变'
-    #     elif feedback_type in ['unclear', 'needsguidance', 'inaccurate']:
-    #         optimization_type = 'standard_adjustment'
-    #         msg = f'反馈已收到，已应用{feedback_type}类型的标准优化'
-        
-    #     # 如果有具体意见，会触发额外的动态优化
-    #     if custom_feedback and len(custom_feedback) > 10:
-    #         optimization_type = 'custom_optimization'
-    #         msg = '反馈已收到，已根据您的具体意见进行个性化优化'
-        
-    #     logger.info(f"Session {session_id} 应用了优化类型: {optimization_type}")
-        
-    # except Exception as e:
-    #     logger.error(f'处理反馈优化时出错: {str(e)}')
-    #     msg = '反馈已收到，但优化过程出现问题'
-
-    # # 保存到反馈日志文件
-    # try:
-    #     feedback_logger = setup_logger('FEEDBACK', log_file='logs/feedback.log')
-    #     feedback_record['optimization_type'] = optimization_type
-    #     feedback_logger.info(json.dumps(feedback_record, ensure_ascii=False))
-    # except Exception as log_error:
-    #     logger.warning(f'保存反馈')
+    if not feedback_request.timestamp:
+        feedback_request.timestamp = datetime.now().isoformat()
     
-    return jsonify({
+    # 记录反馈信息
+    logger.info(f"session_id: {feedback_request.sessionId}")
+    logger.info(f"user_query: {feedback_request.userQuery}")
+    logger.info(f"assistant_response: {feedback_request.assistantResponse}")
+    logger.info(f"dialogType: {feedback_request.dialogType}")
+    logger.info(f"problemSolved: {feedback_request.problemSolved}")
+    logger.info(f"rating: {feedback_request.rating}")
+    
+    return {
         'msg': "testing",
         'code': 200,
         'optimization_triggered': "123",
         'timestamp': datetime.now().isoformat()
-    }), 200
+    }
 
+# 认证路由
+@app.get("/login")
+async def login_page(request: Request):
+    if is_authenticated(request):
+        return RedirectResponse(url="/ccs")
+    return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
-@app.route('/prompt/optimization_report', methods=['GET'])
-def get_optimization_report():
-    """获取prompt优化报告API"""
-    try:
-        session_id = request.args.get('session_id', None)
-        
-        # 获取优化报告
-        report = NativeChator_med_audio.get_optimization_report(session_id)
-        
-        return jsonify({
-            'code': 200,
-            'msg': 'success',
-            'report': report,
-            'timestamp': datetime.now().isoformat()
-        }), 200
-        
-    except Exception as e:
-        logger.error(f'获取优化报告失败: {str(e)}')
-        return jsonify({
-            'code': 500,
-            'msg': f'获取报告失败: {str(e)}'
-        }), 500
+@app.post("/login")
+async def login(request: Request, password: str = Form(...)):
+    if password == PASSWORD:
+        session_id, session_data = get_auth_session(request)
+        session_data["authenticated"] = True
+        response = RedirectResponse(url="/ccs", status_code=status.HTTP_303_SEE_OTHER)
+        response.set_cookie(key="session_id", value=session_id, httponly=True, secure=True, samesite="lax")
+        return response
+    
+    return templates.TemplateResponse("login.html", {"request": request, "error": "密码错误，请重试"}, status_code=status.HTTP_401_UNAUTHORIZED)
 
+@app.get("/logout")
+async def logout(request: Request):
+    session_id = request.cookies.get("session_id")
+    if session_id in auth_sessions:
+        auth_sessions.pop(session_id)
+    response = RedirectResponse(url="/login")
+    response.delete_cookie("session_id")
+    return response
 
-@app.route('/prompt/reset', methods=['POST'])
-def reset_session_prompt():
-    """重置会话prompt为默认值"""
-    try:
-        request_data = request.get_json()
-        session_id = request_data.get('session_id')
-        
-        if not session_id:
-            return jsonify({
-                'code': 400,
-                'msg': '缺少session_id参数'
-            }), 400
-        
-        # 重置prompt
-        NativeChator_med_audio.reset_session_prompt(session_id)
-        
-        return jsonify({
-            'code': 200,
-            'msg': f'Session {session_id} prompt已重置',
-            'timestamp': datetime.now().isoformat()
-        }), 200
-        
-    except Exception as e:
-        logger.error(f'重置prompt失败: {str(e)}')
-        return jsonify({
-            'code': 500,
-            'msg': f'重置失败: {str(e)}'
-        }), 500
+# 受保护的路由
+@app.get("/")
+async def home():
+    return RedirectResponse(url="/login")
 
+@app.get("/ccs")
+async def serve_index(request: Request, _: None = Depends(require_auth)):
+    return FileResponse("templates/index.html")
+
+# 创建登录模板
+def create_login_template():
+    template_dir = Path("templates")
+    template_dir.mkdir(exist_ok=True)
+    
+    login_html = """<!DOCTYPE html>
+<html>
+<head>
+    <title>口令验证</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f5f5f5; }
+        .login-container { max-width: 400px; margin: 100px auto; padding: 20px; background: white; border-radius: 5px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        input[type="password"] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; }
+        button { width: 100%; padding: 10px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .error { color: red; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1>请输入口令</h1>
+        {% if error %}
+            <p class="error">{{ error }}</p>
+        {% endif %}
+        <form method="POST">
+            <input type="password" name="password" placeholder="输入口令" required>
+            <button type="submit">验证</button>
+        </form>
+    </div>
+</body>
+</html>"""
+    
+    with open(template_dir / "login.html", "w", encoding="utf-8") as f:
+        f.write(login_html)
+
+# 初始化模板
+if not Path("templates/login.html").exists():
+    create_login_template()
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5019, debug=False)
-    
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=51218,
+        ssl_keyfile="zhengshu/sophonine.com.key",
+        ssl_certfile="zhengshu/sophonine.com_bundle.pem",
+        reload=False
+    )
+    server = uvicorn.Server(config)
+    server.run()
 
-# nohup python3 -m chat_llm.cloud_chat_api_wrap &

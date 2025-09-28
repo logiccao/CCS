@@ -288,7 +288,7 @@
         .typing-dot:nth-child(2) { animation-delay: 0.2s; }
         .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-/*        .feedback-section {
+        .feedback-section {
             background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
             border: 1px solid #0ea5e9;
             border-radius: 12px;
@@ -687,8 +687,8 @@
     <script>
         class MedicalChatSystem {
             constructor() {
-                this.apiUrl = 'http://175.178.186.179:5019/chat_audio/naive_med';
-                this.feedbackUrl = 'http://175.178.186.179:5019/feedback';
+                this.apiUrl = 'https://175.178.186.179:51218/chat_audio/naive_med';
+                this.feedbackUrl = 'https://175.178.186.179:51218/feedback';
                 this.sessionId = null; // 由服务端返回
                 this.dialogCount = 0;
                 this.currentDialogType = 'general';
