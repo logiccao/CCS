@@ -4,20 +4,22 @@
 创建时间: 2025/09/28
 作者: logiccao
 """
+import re
+import time
+import uuid
+import json
+import secrets
+import uvicorn
+from pathlib import Path
+from typing import Union, Optional
+from datetime import datetime
 from fastapi import FastAPI, Request, Depends, HTTPException, status, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Union
-import json
-import secrets
-import uvicorn
-from pathlib import Path
-from datetime import datetime
-import uuid
-import re
+
 
 # 导入业务模块
 from chat_llm.logger import setup_logger
@@ -53,17 +55,21 @@ def should_end_call(user_input):
 
 # 请求模型
 class ChatRequest(BaseModel):
+    age: int = 0
+    sex: str
     query: str
     session_id: str = ""
     dialog_type: str = ""
-
-from typing import Union
+    dialog_mode: str = ""
 
 class FeedbackRequest(BaseModel):
-    sessionId: str
+    sessionId: Optional[str] = None
     userQuery: str
     assistantResponse: str
+    customFeedback: str
+    dialogMode: str
     dialogType: str
+    feedbackType: str
     problemSolved: Union[str, bool]  # 允许字符串或布尔值
     rating: Union[str, int]          # 允许字符串或整数
     timestamp: str = ""
@@ -104,20 +110,24 @@ async def naive_med_chat_api(chat_request: ChatRequest):
     query = chat_request.query
     session_id = chat_request.session_id
     
-    # 会话管理
-    if not session_id:
-        session_id = generate_session_id()
-        session_cache[session_id] = ''
-        logger.info('新会话')
-    else:
-        if session_id not in session_cache:
-            raise HTTPException(status_code=400, detail='请求错误：session_id')
-        elif session_cache.get(session_id) == 'done':
-            raise HTTPException(status_code=400, detail='请求错误：会话已结束')
+    if 'multi' == chat_request.dialog_mode:
+        logger.info("多轮对话模式")
+        if not session_id:
+            session_id = generate_session_id()
+            session_cache[session_id] = ''
+            logger.info('新会话')
+        else:
+            if session_id not in session_cache:
+                raise HTTPException(status_code=400, detail='请求错误：session_id')
+            elif session_cache.get(session_id) == 'done':
+                raise HTTPException(status_code=400, detail='请求错误：会话已结束')
 
-    logger.info(f'request data: {chat_request.dict()}')
-    knowledge = chat_request.dialog_type == "knowledge"
-    stream_resp = NativeChator_med_audio.chat_with_query(session_id=session_id, query=query, knowledge=knowledge)
+        logger.info(f'request data: {chat_request.model_dump()}')
+        knowledge = chat_request.dialog_type == "knowledge"
+        stream_resp = NativeChator_med_audio.chat_with_query(session_id=session_id, query=query, knowledge=knowledge)
+    else:
+        knowledge = chat_request.dialog_type == "knowledge"
+        stream_resp = NativeChator_med_audio.chat_with_query_single(query=query, knowledge=knowledge)
     
     full_text = ''
     session_finish = 'false'
@@ -152,7 +162,8 @@ async def naive_med_chat_api(chat_request: ChatRequest):
         
         # 在生成器结束后记录
         logger.debug(f'request_id: {request_id}')
-        NativeChator_med_audio.store_to_history(session_id, full_text)
+        if 'multi' == chat_request.dialog_mode:
+            NativeChator_med_audio.store_to_history(session_id, full_text)
         logger.debug(f'模型全部回答：{full_text}')
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -186,18 +197,46 @@ async def feedback_api(feedback_request: FeedbackRequest):
     if not feedback_request.timestamp:
         feedback_request.timestamp = datetime.now().isoformat()
     
+    """
+    sessionId: str
+    userQuery: str
+    assistantResponse: str
+    customFeedback: str
+    dialogMode: str
+    dialogType: str
+    feedbackType: str
+    problemSolved: Union[str, bool]  # 允许字符串或布尔值
+    rating: Union[str, int]          # 允许字符串或整数
+    timestamp: str = ""
+    """
     # 记录反馈信息
-    logger.info(f"session_id: {feedback_request.sessionId}")
-    logger.info(f"user_query: {feedback_request.userQuery}")
-    logger.info(f"assistant_response: {feedback_request.assistantResponse}")
+    logger.info(f"sessionId: {feedback_request.sessionId}")
+    logger.info(f"userQuery: '[{feedback_request.userQuery}]'")
+    logger.info(f"assistantResponse: '[{feedback_request.assistantResponse}]'")
+    logger.info(f"dialogMode: {feedback_request.dialogMode}")
     logger.info(f"dialogType: {feedback_request.dialogType}")
+    logger.info(f"feedbackType: {feedback_request.feedbackType}")
     logger.info(f"problemSolved: {feedback_request.problemSolved}")
     logger.info(f"rating: {feedback_request.rating}")
+    logger.info(f"customFeedback: {feedback_request.customFeedback}")
     
+    if 'correction' == feedback_request.feedbackType:
+        logger.info("信息纠正, 动态更新")
+        if feedback_request.customFeedback:
+            knowledge = f"用户提问: {feedback_request.userQuery}, 当前系统回答: '[{feedback_request.assistantResponse}]', 用户纠正知识:{feedback_request.customFeedback}, 纠正时间:{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+            NativeChator_med_audio.dynamic_knowledge.append(knowledge)
+        else:
+            logger.info("其他的情况")
+    elif 'general' == feedback_request.feedbackType:
+        logger.info("一般反馈,暂不处理")
+        logger.info(feedback_request.customFeedback)
+    else:
+        logger.info("其他反馈情况")
+
     return {
-        'msg': "testing",
+        'msg': "success",
         'code': 200,
-        'optimization_triggered': "123",
+        'optimization_triggered': "ok",
         'timestamp': datetime.now().isoformat()
     }
 
@@ -281,8 +320,8 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=51218,
-        ssl_keyfile="zhengshu/sophonine.com.key",
-        ssl_certfile="zhengshu/sophonine.com_bundle.pem",
+        ssl_keyfile="zhengshu/eh-med.com.key",
+        ssl_certfile="zhengshu/eh-med.com.pem",
         reload=False
     )
     server = uvicorn.Server(config)

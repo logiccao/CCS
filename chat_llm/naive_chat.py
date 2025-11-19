@@ -29,6 +29,9 @@ BASE_PROMPT = """# 角色定义
 - **回答要求**
   • 是否型问题和选择型问题：回答尽量简洁；
   • 开放性问题：回答尽量简洁
+  • 如需使用用户更新知识的内容，则一定要根据知识更新时间使用最新的知识
+  • 我们不是公开的，所以医生的个人联系方式如有可以直接回答，如无就说暂时没有记录
+  • 如果使用了动态更新的知识，不要回答知识更新的时间，直接回答问题即可
 
 # 以下为回答样例
 ## 样例一
@@ -38,6 +41,7 @@ BASE_PROMPT = """# 角色定义
 ## 样例二
 用户：睡觉不好可以吃褪黑素吗？
 回答：可以短期吃褪黑素，来改善一下睡眠，但是尽量不要长期依赖它。褪黑素对调节睡眠节律有一定帮助，尤其适用于时差调整或短期失眠。但长期使用可能抑制自身分泌，并可能引起头晕、头痛等副作用。"""
+
 
 # 标准化调整指令
 ADJUSTMENT_TEMPLATES = {
@@ -91,7 +95,7 @@ class NativeChat(object):
         # 使用标准化的基础prompt
         self.base_prompt = BASE_PROMPT
         self.system_prompt = BASE_PROMPT
-        
+        self.dynamic_knowledge = []
         self.current_model = CHAT_CONF.PRIOR_MODEL 
         self.use_model = use_model
         self.error_counts = {
@@ -133,7 +137,8 @@ class NativeChat(object):
 
     def get_session_prompt(self, session_id):
         """获取会话特定的prompt，如果没有则返回基础prompt"""
-        return self.session_prompts.get(session_id, self.base_prompt)
+        # return self.session_prompts.get(session_id, self.base_prompt)
+        return self.base_prompt
 
     def chat_with_query(self, session_id, query, knowledge):
         user_assistant_history = self.get_history(session_id = session_id)
@@ -148,7 +153,13 @@ class NativeChat(object):
         resp = self.chat_with_messages(session_id, user_assistant_history=user_assistant_history, query=query, knowledge=knowledge)
         return resp 
 
-    def retrieve_knowledge(self, query, base_url="http://101.201.212.43:8090", api_key=api_key):
+    def chat_with_query_single(self, query, knowledge):
+        # 使用会话特定的prompt
+        user_assistant_history = [{'role' : 'user', 'content' : query}]
+        resp = self.chat_with_messages(session_id='single', user_assistant_history=user_assistant_history, query=query, knowledge=knowledge)
+        return resp 
+
+    def retrieve_knowledge(self, query, base_url="http://bl2.eh-med.com:8091", api_key=api_key):
         url = f"{base_url}/v1/knowledge/retrieve"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -182,17 +193,23 @@ class NativeChat(object):
         if len(user_assistant_history) > CHAT_CONF.CONVERSATION_LAST_N_ROUND * 2:
             self.logger.info('当前对话历史过长，开始截短')
             user_assistant_history = cut_messages(user_assistant_history)
-        
+            
         if knowledge:
             knowledge = self.retrieve_knowledge(query)
-
-        # 使用会话特定的prompt
-        current_prompt = self.get_session_prompt(session_id) + f"\n检索知识：{knowledge}"
+            current_prompt = self.get_session_prompt(session_id) + f'\n\n知识库检索知识：\n"""{knowledge}"""\n\n'
+            if self.dynamic_knowledge:
+                current_prompt = self.get_session_prompt(session_id) + f'\n\n知识库检索知识：\n"""{knowledge}"""\n\n' + f'\n\n用户更新知识：\n"""{'\n'.join(self.dynamic_knowledge)}"""'
+        else:
+            current_prompt = self.get_session_prompt(session_id)
+            if self.dynamic_knowledge:
+                current_prompt = self.get_session_prompt(session_id) + f'\n\n用户更新知识：\n"""{'\n'.join(self.dynamic_knowledge)}"""'
         system_message = {
             'role' : 'system',
             'content' : current_prompt
         }
+
         current_messages = [system_message] + user_assistant_history
+
         self.logger.info(f'{session_id} 当前输入大模型的用户多轮对话如下：\n {user_assistant_history}')
         self.logger.info(f'{session_id} 当前输入大模型的系统指令如下：\n {current_prompt}')
 

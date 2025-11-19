@@ -231,8 +231,8 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=51218,
-        ssl_keyfile="zhengshu/sophonine.com.key",
-        ssl_certfile="zhengshu/sophonine.com_bundle.pem",
+        ssl_keyfile="zhengshu/eh-med.com.key",
+        ssl_certfile="zhengshu/eh-med.com.pem",
         reload=False
     )
     server = uvicorn.Server(config)
