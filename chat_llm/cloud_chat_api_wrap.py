@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-文件名: app_ccs.py
+文件名: cloud_chat_api_wrap.py
 创建时间: 2025/09/28
 作者: logiccao
 """
@@ -55,8 +55,6 @@ def should_end_call(user_input):
 
 # 请求模型
 class ChatRequest(BaseModel):
-    age: int = 0
-    sex: str
     query: str
     session_id: str = ""
     dialog_type: str = ""
@@ -161,10 +159,10 @@ async def naive_med_chat_api(chat_request: ChatRequest):
             yield f'id: {request_id}\nevent: done\ndata: {json.dumps(response_data)}\n\n'
         
         # 在生成器结束后记录
-        logger.debug(f'request_id: {request_id}')
+        logger.info(f'request_id: {request_id}')
         if 'multi' == chat_request.dialog_mode:
             NativeChator_med_audio.store_to_history(session_id, full_text)
-        logger.debug(f'模型全部回答：{full_text}')
+        logger.info(f'模型全部回答：{full_text}')
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
@@ -197,41 +195,15 @@ async def feedback_api(feedback_request: FeedbackRequest):
     if not feedback_request.timestamp:
         feedback_request.timestamp = datetime.now().isoformat()
     
-    """
-    sessionId: str
-    userQuery: str
-    assistantResponse: str
-    customFeedback: str
-    dialogMode: str
-    dialogType: str
-    feedbackType: str
-    problemSolved: Union[str, bool]  # 允许字符串或布尔值
-    rating: Union[str, int]          # 允许字符串或整数
-    timestamp: str = ""
-    """
-    # 记录反馈信息
-    logger.info(f"sessionId: {feedback_request.sessionId}")
-    logger.info(f"userQuery: '[{feedback_request.userQuery}]'")
-    logger.info(f"assistantResponse: '[{feedback_request.assistantResponse}]'")
-    logger.info(f"dialogMode: {feedback_request.dialogMode}")
-    logger.info(f"dialogType: {feedback_request.dialogType}")
-    logger.info(f"feedbackType: {feedback_request.feedbackType}")
-    logger.info(f"problemSolved: {feedback_request.problemSolved}")
-    logger.info(f"rating: {feedback_request.rating}")
-    logger.info(f"customFeedback: {feedback_request.customFeedback}")
-    
-    if 'correction' == feedback_request.feedbackType:
-        logger.info("信息纠正, 动态更新")
-        if feedback_request.customFeedback:
-            knowledge = f"用户提问: {feedback_request.userQuery}, 当前系统回答: '[{feedback_request.assistantResponse}]', 用户纠正知识:{feedback_request.customFeedback}, 纠正时间:{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
-            NativeChator_med_audio.dynamic_knowledge.append(knowledge)
-        else:
-            logger.info("其他的情况")
-    elif 'general' == feedback_request.feedbackType:
-        logger.info("一般反馈,暂不处理")
-        logger.info(feedback_request.customFeedback)
+    # 修改：不再判断反馈类型，所有反馈都直接更新知识
+    if feedback_request.customFeedback:
+        logger.info("用户反馈，动态更新知识库")
+        # knowledge = f"用户提问: {feedback_request.userQuery}, 当前系统回答: '[{feedback_request.assistantResponse}]', 用户反馈:{feedback_request.customFeedback}, 反馈时间:{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+        knowledge = f"用户提问: {feedback_request.userQuery}, 用户反馈:{feedback_request.customFeedback}, 反馈时间:{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+        NativeChator_med_audio.dynamic_knowledge.append(knowledge)
+        logger.info(f"已更新动态知识库，新增知识条目")
     else:
-        logger.info("其他反馈情况")
+        logger.info("用户提交了反馈但没有具体内容")
 
     return {
         'msg': "success",
@@ -239,6 +211,38 @@ async def feedback_api(feedback_request: FeedbackRequest):
         'optimization_triggered': "ok",
         'timestamp': datetime.now().isoformat()
     }
+
+@app.post('/clear_dynamic_knowledge')
+async def clear_dynamic_knowledge():
+    """
+    清空动态知识库
+    """
+    try:
+        # 清空动态知识库
+        if hasattr(NativeChator_med_audio, 'dynamic_knowledge'):
+            original_count = len(NativeChator_med_audio.dynamic_knowledge)
+            NativeChator_med_audio.dynamic_knowledge = []
+            
+            logger.info(f"动态知识库已清空，原有个数: {original_count}")
+            
+            return {
+                'msg': 'success',
+                'code': 200,
+                'cleared_count': original_count,
+                'timestamp': datetime.now().isoformat()
+            }
+        else:
+            return {
+                'msg': 'dynamic_knowledge attribute not found',
+                'code': 404,
+                'cleared_count': 0,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        logger.error(f'清空动态知识库失败: {str(e)}')
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # 认证路由
 @app.get("/login")
@@ -326,4 +330,3 @@ if __name__ == "__main__":
     )
     server = uvicorn.Server(config)
     server.run()
-
